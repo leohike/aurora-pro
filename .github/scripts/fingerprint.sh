@@ -26,18 +26,33 @@ base_json=$(skopeo inspect --no-tags "docker://$base_ref")
 base_digest=$(jq -r .Digest <<<"$base_json")
 fedora=$(jq -r '.Labels["org.opencontainers.image.version"]' <<<"$base_json" | cut -d. -f1)
 
-inputs_hash=$(find "$recipe" files .github -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)
+# All of recipes/, not just this recipe: the recipes share modules via `from-file:`.
+inputs_hash=$(find recipes files .github -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)
 
-dnf_repos='.modules[] | select(.type == "dnf") | .repos'
-if [[ -n $(yq "$dnf_repos | select(.copr != null or (.nonfree != null and .nonfree != \"negativo17\"))" "$recipe") ]]; then
+# The recipe's modules, one JSON object per line, with `from-file:` includes
+# (resolved against recipes/, like BlueBuild does) expanded in place.
+modules() {
+    local module include
+    while read -r module; do
+        include=$(jq -r '.["from-file"] // empty' <<<"$module")
+        if [[ -n $include ]]; then
+            modules "recipes/$include"
+        else
+            echo "$module"
+        fi
+    done < <(yq -o=json -I=0 '.modules[]' "$1")
+}
+dnf_modules=$(modules "$recipe" | jq -c 'select(.type == "dnf")')
+
+if [[ -n $(jq '.repos // {} | select(.copr != null or (.nonfree != null and .nonfree != "negativo17"))' <<<"$dnf_modules") ]]; then
     echo "fingerprint.sh: recipe uses a dnf repo kind this script does not replicate (copr/rpmfusion); teach it first" >&2
     exit 1
 fi
 mapfile -t repo_urls < <(
-    yq '.modules[] | select(.type == "dnf") | .repos.files // [] | .[]' "$recipe"
-    yq '.modules[] | select(.type == "dnf") | select(.repos.nonfree == "negativo17") | "'"$negativo17_url"'"' "$recipe"
+    jq -r '.repos.files // [] | .[]' <<<"$dnf_modules"
+    jq -r --arg url "$negativo17_url" 'select(.repos.nonfree == "negativo17") | $url' <<<"$dnf_modules"
 )
-mapfile -t packages < <(yq '.modules[] | select(.type == "dnf") | .install.packages // [] | .[]' "$recipe")
+mapfile -t packages < <(jq -r '.install.packages // [] | .[]' <<<"$dnf_modules")
 
 versions=$(podman run --rm -e REPOS="${repo_urls[*]}" \
     "registry.fedoraproject.org/fedora:$fedora" bash -c '

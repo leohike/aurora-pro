@@ -1,0 +1,25 @@
+---
+# yaml-language-server: $schema=https://schema.blue-build.org/recipe-v1.json
+# image will be published to ghcr.io/leohike/aurora-max-nvidia
+name: aurora-max-nvidia
+description: aurora-max on Aurora DX with the NVIDIA driver, for Turing and newer GPUs (built for an RTX A3000).
+
+# Aurora DX with NVIDIA's driver: the open kernel module plus NVIDIA's own
+# OpenGL/Vulkan/CUDA libraries, nvidia-container-toolkit included. Universal
+# Blue only builds the "open" flavour now, which needs Turing or newer.
+base-image: ghcr.io/ublue-os/aurora-dx-nvidia-open
+image-version: stable
+
+# module configuration, executed in order
+modules:
+  # everything the two images share: packages, Steam, Wine
+  - from-file: common.yml
+
+  # 32-bit NVIDIA libraries, pinned to the installed driver. Must come after
+  # the Steam/Wine module, which brings in the 32-bit base they sit on.
+  - type: script
+    scripts:
+      - nvidia-multilib.sh
+
+  # sets up the policy & signing files so signed images verify properly
+  - type: signing

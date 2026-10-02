@@ -23,49 +23,13 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref || github.run_id }}
   cancel-in-progress: false
 env:
-  IMAGE: ghcr.io/${{ github.repository_owner }}/aurora-pro
   # the tag the gate compares against: :latest on main, :<branch> elsewhere
   TAG: ${{ github.ref_name == 'main' && 'latest' || github.ref_name }}
 jobs:
-  gate:
-    name: Check for changes
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    outputs:
-      build: ${{ steps.decide.outputs.build }}
-      fingerprint: ${{ steps.fingerprint.outputs.fingerprint }}
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Compute fingerprint
-        id: fingerprint
-        run: echo "fingerprint=$(.github/scripts/fingerprint.sh recipes/recipe.yml)" >> "$GITHUB_OUTPUT"
-
-      - name: Compare with published image
-        id: decide
-        env:
-          EVENT: ${{ github.event_name }}
-          FORCE: ${{ inputs.force }}
-          FINGERPRINT: ${{ steps.fingerprint.outputs.fingerprint }}
-        run: |
-          published=$(skopeo inspect --no-tags "docker://$IMAGE:$TAG" 2>/dev/null \
-            | jq -r '.Labels["org.aurora-pro.fingerprint"] // empty' || true)
-          echo "fingerprint: $FINGERPRINT"
-          echo "published:   ${published:-<none>} ($IMAGE:$TAG)"
-          if [[ $EVENT == pull_request || ($EVENT == workflow_dispatch && $FORCE == true) ]]; then
-            build=true
-          elif [[ $FINGERPRINT != "$published" ]]; then
-            build=true
-          else
-            build=false
-          fi
-          echo "build=$build" | tee -a "$GITHUB_OUTPUT"
-
+  # One job per recipe, each with its own gate: the two images have different
+  # bases, so each is skipped or built on its own fingerprint.
   bluebuild:
-    name: Build Custom Image
-    needs: gate
-    if: needs.gate.outputs.build == 'true'
+    name: ${{ matrix.recipe }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -75,20 +39,48 @@ jobs:
       fail-fast: false # stop GH from cancelling all matrix builds if one fails
       matrix:
         recipe:
-          # !! Add your recipes here
-          - recipe.yml
+          - recipe.yml # aurora-max
+          - recipe-nvidia.yml # aurora-max-nvidia
+    env:
+      RECIPE: recipes/${{ matrix.recipe }}
     steps:
       - uses: actions/checkout@v7
 
+      - name: Check for changes
+        id: gate
+        env:
+          EVENT: ${{ github.event_name }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/$(yq '.name' "$RECIPE")"
+          fingerprint=$(.github/scripts/fingerprint.sh "$RECIPE")
+          published=$(skopeo inspect --no-tags "docker://$image:$TAG" 2>/dev/null \
+            | jq -r '.Labels["org.aurora-max.fingerprint"] // empty' || true)
+          echo "fingerprint: $fingerprint"
+          echo "published:   ${published:-<none>} ($image:$TAG)"
+          if [[ $EVENT == pull_request || ($EVENT == workflow_dispatch && $FORCE == true) ]]; then
+            build=true
+          elif [[ $fingerprint != "$published" ]]; then
+            build=true
+          else
+            build=false
+          fi
+          {
+            echo "image=$image"
+            echo "fingerprint=$fingerprint"
+            echo "build=$build"
+          } | tee -a "$GITHUB_OUTPUT"
+
       # The next gate reads this label back from the published image.
       - name: Stamp fingerprint into the recipe
+        if: steps.gate.outputs.build == 'true'
         env:
-          FINGERPRINT: ${{ needs.gate.outputs.fingerprint }}
-          RECIPE: recipes/${{ matrix.recipe }}
-        run: yq -i '.labels["org.aurora-pro.fingerprint"] = strenv(FINGERPRINT)' "$RECIPE"
+          FINGERPRINT: ${{ steps.gate.outputs.fingerprint }}
+        run: yq -i '.labels["org.aurora-max.fingerprint"] = strenv(FINGERPRINT)' "$RECIPE"
 
       # the build is fully handled by the reusable github action
       - name: Build Custom Image
+        if: steps.gate.outputs.build == 'true'
         uses: blue-build/github-action@v1.13
         with:
           recipe: ${{ matrix.recipe }}
@@ -105,21 +97,44 @@ jobs:
       # plain :<branch> at the same digest; the cosign signature is keyed by
       # digest, so it verifies under the new tag too.
       - name: Tag as :${{ env.TAG }}
-        if: github.event_name != 'pull_request' && github.ref_name != 'main'
+        if: steps.gate.outputs.build == 'true' && github.event_name != 'pull_request' && github.ref_name != 'main'
         env:
-          FINGERPRINT: ${{ needs.gate.outputs.fingerprint }}
+          IMAGE: ${{ steps.gate.outputs.image }}
+          FINGERPRINT: ${{ steps.gate.outputs.fingerprint }}
           REF_NAME: ${{ github.ref_name }}
           GH_TOKEN: ${{ github.token }}
           ACTOR: ${{ github.actor }}
-          RECIPE: recipes/${{ matrix.recipe }}
         run: |
           fedora=$(skopeo inspect --no-tags "docker://$(yq '.["base-image"]' "$RECIPE"):$(yq '.["image-version"]' "$RECIPE")" \
             | jq -r '.Labels["org.opencontainers.image.version"]' | cut -d. -f1)
           src="$IMAGE:br-${REF_NAME//\//_}-$fedora"
-          got=$(skopeo inspect --no-tags "docker://$src" | jq -r '.Labels["org.aurora-pro.fingerprint"] // empty')
+          got=$(skopeo inspect --no-tags "docker://$src" | jq -r '.Labels["org.aurora-max.fingerprint"] // empty')
           if [[ $got != "$FINGERPRINT" ]]; then
             echo "::error::$src carries fingerprint '$got', expected '$FINGERPRINT'"
             exit 1
           fi
           echo "$GH_TOKEN" | skopeo login ghcr.io -u "$ACTOR" --password-stdin
           skopeo copy --preserve-digests "docker://$src" "docker://$IMAGE:$TAG"
+
+      # What actually went in, on the run's summary page: the packages this repo
+      # adds, and the whole NVIDIA set with arches (x86_64/i686 must match).
+      # Informational only, never fails the build.
+      - name: Report
+        if: steps.gate.outputs.build == 'true' && github.event_name != 'pull_request'
+        continue-on-error: true
+        env:
+          IMAGE: ${{ steps.gate.outputs.image }}
+        run: |
+          {
+            echo "### $IMAGE:$TAG"
+            echo '```'
+            podman run --rm "$IMAGE:$TAG" bash -c '
+              cat /usr/lib/os-release | grep -E "^(VERSION|IMAGE_VERSION)="
+              echo "kernel $(rpm -q kernel)"
+              echo
+              rpm -q kvantum snapper btrfs-assistant btrbk steam gamescope wine lutris
+              echo
+              nv=$(rpm -qa --queryformat "%{NAME}-%{EVR}.%{ARCH}\n" | grep -E "^(kmod-nvidia|nvidia-|libnvidia-)" | sort)
+              echo "${nv:-no NVIDIA packages}"'
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"

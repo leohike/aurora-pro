@@ -1,0 +1,101 @@
+---
+# yaml-language-server: $schema=https://schema.blue-build.org/module-list-v1.json
+# Modules shared by both images. Included with `from-file:` from recipe.yml
+# (aurora-max) and recipe-nvidia.yml (aurora-max-nvidia), so the two only
+# differ in their base image and what follows this list.
+modules:
+  # copies files/system/* into the image root. Currently empty -- this is where
+  # a snapper config or a udev rule would go later.
+  - type: files
+    files:
+      - source: system
+        destination: /
+
+  - type: dnf
+    install:
+      packages:
+        # Qt style engine. Was a layered package before this image existed.
+        - kvantum
+        # btrfs snapshots for the subvolumes ostree does not cover.
+        # Does NOT replace ostree rollback for the OS itself.
+        - snapper
+        # GUI for snapper and btrfs subvolumes. Image-shaped because it runs as
+        # root through a polkit policy in /usr. Ships no snapper config: create
+        # one for /var/home at runtime (never /, ostree owns that), it lands in
+        # /etc and survives rebases. Same package Bazzite bakes in.
+        # Pulls btrfsmaintenance as a weak dep (57 KiB, scrub/balance timers,
+        # all disabled by Fedora's preset). If enabling scrub, point
+        # BTRFS_SCRUB_MOUNTPOINTS at /var -- the default "/" is not btrfs here.
+        - btrfs-assistant
+        # Off-disk backups via btrfs send/receive, to a btrfs USB disk or
+        # another btrfs host. Here "just in case": inert until configured --
+        # ships only btrbk.conf.example and a daily timer that Fedora's preset
+        # leaves disabled. Local snapshots of /var/home stay snapper's job.
+        - btrbk
+
+  # Gaming. Steam cannot be layered on aurora-dx at all -- rpm-ostree fails with
+  # "Hardlinking ... index.theme: File exists" because Aurora edits the default
+  # icon theme and libXcursor can then no longer hardlink (ublue-os/bluefin#1258,
+  # closed "not planned"). A container build has no ostree hardlinking, so it
+  # installs cleanly here and only here.
+  #
+  # negativo17, NOT rpmfusion: Aurora already replaces Mesa with negativo17's
+  # build (42 packages on the running system come from there). Steam pulls the
+  # 32-bit Mesa/Vulkan stack, and multilib requires both arches at the same
+  # version -- negativo17 ships i686 and x86_64 together, Fedora's would not
+  # match the installed x86_64 ones.
+  #
+  # Wine is the same story: `rpm-ostree install wine` fails on Silverblue and
+  # Kinoite with i686 hardlink errors (unixODBC, openal-soft -- RHBZ #1846803,
+  # rpm-ostree#1937), so a system-wide `wine` command can only come from the
+  # image. Bottles-as-flatpak and a distrobox both work but put it behind a
+  # wall; neither gives you `wine foo.exe` in a terminal or .exe associations.
+  #
+  # Depsolved against the live aurora-dx package set before committing:
+  # 402 installs, 1 GiB download, ~4 GiB on disk. The expensive part is the
+  # 32-bit Mesa stack, which Steam requires anyway -- Wine on top of it is
+  # incremental rather than a second bootstrap.
+  - type: dnf
+    repos:
+      nonfree: negativo17
+      files:
+        - https://negativo17.org/repos/fedora-steam.repo
+      keys:
+        - https://negativo17.org/repos/RPM-GPG-KEY-slaanesh
+      cleanup: true
+    install:
+      packages:
+        # Steam client, from negativo17's steam repo (1.0.0.87-2.fc44).
+        - steam
+        # Controller udev rules. Plain Fedora, noarch. On stock Aurora these
+        # only arrive with the Steam flatpak.
+        - steam-devices
+        # Valve's compositor. Plain Fedora. The binary only -- Game Mode as a
+        # session needs kernel patches Aurora's stock kernel does not have.
+        - gamescope
+        # Overlay. Plain Fedora, both arches.
+        - mangohud
+
+        # Wine as a host capability, not just a game runner: `wine foo.exe`
+        # from any shell, .exe/.msi associations, menu entries for installed
+        # Windows apps, winecfg/wineboot/winetricks on hand-made prefixes.
+        - wine
+        # MUST be explicit. Fedora's `wine` metapackage pulls x86_64 only
+        # (measured: zero i686 packages), and most old Windows games are
+        # 32-bit binaries -- without this, Wine cannot run them.
+        - wine-core.i686
+        - wine-pulseaudio.i686
+        # .NET applications. wine-gecko comes along for embedded HTML.
+        - wine-mono
+        - winetricks
+
+        # ~139 MB now that Wine is already present. Note Lutris prefers its
+        # own downloaded runners (~/.local/share/lutris/runners/wine/) for
+        # games and treats system Wine as a fallback -- it is here for the
+        # library management and the community install scripts, not because
+        # it needs the Wine above.
+        - lutris
+
+        # Omitted: akmod-xone / akmod-xpadneo live in the same negativo17
+        # steam repo, but they are kernel modules with no ublue prebuild for
+        # Aurora's stock Fedora kernel. Not worth the breakage.
