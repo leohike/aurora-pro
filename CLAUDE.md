@@ -1,9 +1,17 @@
-# aurora-pro
+# aurora-max
 
-Personal BlueBuild image: `ghcr.io/ublue-os/aurora-dx:stable` + kvantum, snapper,
-btrfs-assistant, btrbk, and a native Steam/Wine/Lutris stack from negativo17.
-Published to `ghcr.io/mithrandir4859/aurora-pro`. Recipe: `recipes/recipe.yml`;
-CI: `.github/workflows/build.yml`.
+Personal BlueBuild images: Aurora DX + kvantum, snapper, btrfs-assistant, btrbk,
+and a native Steam/Wine/Lutris stack from negativo17. Two images, same modules
+(`recipes/common.yml`, pulled in with `from-file:`):
+
+- `ghcr.io/leohike/aurora-max` (`recipes/recipe.yml`), on `aurora-dx:stable`.
+  Was `ghcr.io/mithrandir4859/aurora-pro` until 2026-10 (GitHub user renamed).
+- `ghcr.io/leohike/aurora-max-nvidia` (`recipes/recipe-nvidia.yml`), on
+  `aurora-dx-nvidia-open:stable`, for an RTX A3000 laptop (P15 Gen 2). Adds
+  the i686 NVIDIA libs Aurora omits (MULTILIB=0), pinned to the installed
+  driver: `files/scripts/nvidia-multilib.sh`.
+
+CI: `.github/workflows/build.yml`, one gated job per recipe.
 
 ## Background docs (read before changing the recipe)
 
@@ -37,13 +45,16 @@ Read-only clones in `/home/shared/projects/`. Quote them rather than guessing:
 
 `.github/scripts/fingerprint.sh` hashes the base image digest, `recipes/` +
 `files/` + `.github/`, and the newest repo versions of every package the recipe
-installs (~15 s, no base image pull). The gate job compares it with the
-`org.aurora-pro.fingerprint` label on the published image and skips the build if
-equal. main is checked every 2 hours and on push, and publishes `:latest`.
+installs, `from-file:` includes expanded (~15 s, no base image pull). Each
+recipe's job compares it with the `org.aurora-max.fingerprint` label on its
+published image and skips the build if equal. main is checked every 2 hours and on push, and publishes `:latest`.
 Manual runs build unless `force` is off.
 
 `dev` is a throwaway branch: create it when needed, delete it after merging.
 While it exists, pushes to it build (gated), and since schedules only fire on
 the default branch, `.github/workflows/schedule-dev.yml` on main dispatches its
 gated check every 2 hours (a no-op while there is no `dev`). `dev` builds
-publish `aurora-pro:dev`.
+publish `:dev` of both images.
+
+Don't pull base images or build locally to test things: check upstream sources
+online first, then verify in CI on `dev`.
