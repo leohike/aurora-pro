@@ -20,15 +20,31 @@ set -euo pipefail
 
 fedora=$(rpm -E %fedora)
 kernel=$(rpm -q kernel --queryformat '%{VERSION}-%{RELEASE}.%{ARCH}\n' | head -n1)
-# Aurora's :stable builds from the coreos-stable akmods flavour (`akmods_flavor`
-# in ublue-os/aurora's Justfile); its other streams use main.
-image="ghcr.io/ublue-os/akmods-nvidia-open:coreos-stable-$fedora-$kernel"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
 for tool in skopeo jq; do
     command -v "$tool" >/dev/null || dnf5 -y install "$tool"
 done
+
+# Aurora's :stable builds from the coreos-stable akmods flavour (`akmods_flavor`
+# in ublue-os/aurora's Justfile) -- except right after a Fedora rebase, when it
+# temporarily uses coreos-testing until coreos-stable catches up (Fedora 45,
+# 2026-11-17: no coreos-stable-45 tags existed and this build failed). Take the
+# first flavour that has an image for this exact kernel.
+image=
+for flavor in coreos-stable coreos-testing; do
+    candidate="ghcr.io/ublue-os/akmods-nvidia-open:$flavor-$fedora-$kernel"
+    if skopeo inspect --no-tags --retry-times 3 "docker://$candidate" >/dev/null 2>&1; then
+        image=$candidate
+        break
+    fi
+    echo "no $candidate"
+done
+if [[ -z $image ]]; then
+    echo "no akmods-nvidia-open image for Fedora $fedora, kernel $kernel" >&2
+    exit 1
+fi
 
 echo "fetching $image"
 skopeo copy --retry-times 3 "docker://$image" "dir:$work/image"
